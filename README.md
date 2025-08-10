@@ -52,12 +52,3 @@ python orchestrator.py
 tail -f monitoring.log
 cat portfolio_output.csv
 ```
-
-### Test Coverage Areas
-
-```bash
-# Run full test suite
-python test_system.py
-
-# Expected Results: >90% success rate
-```
