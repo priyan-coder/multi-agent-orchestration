@@ -2,230 +2,345 @@
 
 ## 🏗️ System Architecture
 
-The Portfolio Enrichment System is a **multi-agent parallel processing system** that enriches portfolio CSV data by resolving missing stock symbols and company names using the Finnhub API.
+The Portfolio Enrichment System is a **distributed multi-agent processing system** that enriches portfolio CSV data by resolving missing stock symbols and company names using the Finnhub API with intelligent sharding, parallel execution, and advanced semantic matching.
 
-## 🔄 Core API Logic (`core_functions.py`)
+## 🔄 Core API Logic & Resolution Engine (`core_functions.py`)
 
-### Symbol Resolution Priority System
+### Symbol Resolution Three-Tier Strategy
 
-#### 1. **Main Entry Point: `resolve_symbol()`**
+The system implements a sophisticated **three-tier resolution strategy** with priority fallback:
 
-```python
-Priority: Smart Resolver → Fallback API Search
+#### **Main Entry Point: `resolve_symbol()`**
+
+```text
+Priority Flow: Smart Resolver → Direct API Fallback
+Confidence Threshold: 0.6 (configurable)
+Fallback Threshold: 0.3 (reduced for last resort)
 ```
 
-- **Input**: Company name, API key, confidence threshold
-- **Output**: Stock symbol or None
-- **Strategy**: Smart caching first, then direct API fallback
+#### **Smart Symbol Resolver: `SmartSymbolResolver`**
 
-#### 2. **Smart Symbol Resolver: `SmartSymbolResolver`**
-
-```python
-Three-Tier Resolution:
-1. Primary API Search (Finnhub /search)
-2. API Search with Variations (company name variations)
-3. Tiktoken-based Local Matching (cached company universe)
-```
-
-**Tier 1: Primary API Search**
+##### **Tier 1: Primary API Search**
 
 - Direct Finnhub `/search` API call
-- Immediate return if confidence >= 0.6
-- Most accurate, real-time data
+- Enhanced tiktoken-based result scoring
+- Returns immediately if confidence ≥ 0.6
+- Most accurate, real-time results
 
-**Tier 2: Original API with Variations**
+##### **Tier 2: API Search with Intelligent Variations**
 
-- Generates intelligent search variations:
-  - Remove corporate suffixes (Inc, Corp, Ltd)
-  - Handle acronyms and abbreviations
-  - Try reversed word order
-  - Remove geographic indicators
-- Each variation tested against API
-- Returns first match above threshold
+- Generates semantic search variations:
+  - Corporate suffix removal (Inc., Corp., Ltd., Co.)
+  - "The" prefix handling
+  - Class designation stripping (Class A/B)
+  - Two-word truncation for focus
+- Each variation tested with full scoring
+- Returns first match above minimum threshold
 
-**Tier 3: Tiktoken-based Local Matching**
+##### **Tier 3: Tiktoken-Based Cached Matching**
 
-- Uses cached company universe (7-day TTL)
-- **Tiktoken similarity scoring**:
-  - Token-level Jaccard similarity
-  - Word-level overlap bonus
+- Uses pre-fetched US company universe (7-day TTL)
+- **Advanced semantic similarity**:
+  - Token-level Jaccard similarity (cl100k_base encoding)
+  - Word-level overlap bonus weighting
+  - Exact match detection (1.0 score)
   - Acronym matching heuristics
-- Fallback when API fails or has low confidence
+- Offline fallback when API unavailable
+
+### Enhanced API Result Scoring Algorithm
+
+```python
+Final Score = (0.7 × Semantic Score) + Bonuses
+
+Bonuses:
+- Exact name match: +0.4
+- Acronym match (full): +0.5
+- Acronym match (partial): +0.2
+- Corporate suffix alignment: +0.1
+- Preferred exchange (NASDAQ/NYSE): +0.05
+- Symbol quality (≤4 chars, alpha): +0.05
+```
 
 ### Company Name Resolution: `resolve_name()`
 
 - **API Endpoint**: Finnhub `/stock/profile2`
-- **Input**: Stock symbol
-- **Output**: Company name
-- **Validation**: Name format and length checks
+- **Input**: Stock symbol (normalized uppercase)
+- **Output**: Company name with validation
+- **Error Handling**: Specific handling for invalid symbols
 
-### API Infrastructure
+## 🚦 Rate Limiting & Error Handling
 
-#### Rate Limiting & Retry Logic
+### Intelligent Rate Limiter
 
 ```python
-RateLimiter: 60 requests/minute with 90% buffer
-RetryLogic: Exponential backoff (1s → 2s → 4s → max 30s)
-ErrorHandling: Specific handling for 422, 429, 401, 403, 5xx errors
+Configuration:
+- Base Rate: 60 requests/minute
+- Safety Buffer: 90% (54 effective requests/minute)
+- Sliding Window: In-memory timestamp tracking
+- Auto-throttling: Dynamic wait calculation
 ```
 
-#### Caching System
+### Exponential Backoff Retry
 
 ```python
-Company Universe Cache:
-- Source: Finnhub /stock/symbol (US exchange)
-- TTL: 7 days
-- Filter: Common Stock only, symbol length ≤ 6
-- Storage: JSON with timestamp validation
+Strategy: @retry_with_backoff decorator
+- Max Retries: 3 attempts
+- Base Delay: 1.0 seconds
+- Backoff Multiplier: 2.0x
+- Max Delay: 30 seconds
+- Jitter: 0.5-1.5x randomization
 ```
 
-#### Tiktoken Integration
+### Comprehensive Error Classification
 
 ```python
-SemanticMatcher:
-- Tokenizer: cl100k_base encoding
-- Scoring: Jaccard similarity on token sets + word overlap
-- Normalization: Remove corporate suffixes, special chars
-- Fallback: Character-based matching if tiktoken unavailable
+Status Codes:
+- SUCCESS: Successful resolution
+- NOT_FOUND: No matches found
+- LOW_CONFIDENCE: Match below threshold
+- RATE_LIMITED: 429 HTTP response
+- ERROR: Network/API failures
 ```
 
-## 🎯 Task System Logic
+## 🗄️ Advanced State Management
 
-### Task A: CSV Reader (`task_a_csv_reader.py`)
-
-```python
-Input: Sample_Portfolio_Holdings.csv
-Process:
-1. Load CSV into pandas DataFrame
-2. Identify missing symbols (empty/null values)
-3. Identify missing names (empty/null values)
-4. Create intelligent shards for parallel processing
-5. Save state to portfolio_state.json
-Output: Missing data analysis + sharding plan
-```
-
-### Task B: Symbol Resolver (`task_b_symbol_resolver.py`)
+### Atomic Operations with FileLock
 
 ```python
-Input: List of row indices with missing symbols
-Process:
-1. Load state from portfolio_state.json
-2. For each row with missing symbol:
-   - Extract company name
-   - Call resolve_symbol() with API priority
-   - Update row with resolved symbol
-3. Batch update state file atomically
-4. Progress logging and heartbeat monitoring
-Output: Updated state with resolved symbols
-```
-
-### Task C: Name Resolver (`task_c_name_resolver.py`)
-
-```python
-Input: List of row indices with missing names
-Process:
-1. Load state from portfolio_state.json
-2. For each row with missing name:
-   - Extract stock symbol
-   - Call resolve_name() API
-   - Update row with resolved company name
-3. Batch update state file atomically
-4. Progress logging and heartbeat monitoring
-Output: Updated state with resolved names
-```
-
-### Task D: CSV Writer (`task_d_csv_writer.py`)
-
-```python
-Input: Complete portfolio_state.json
-Process:
-1. Load final enriched state
-2. Convert to pandas DataFrame
-3. Validate data completeness
-4. Generate completion statistics
-5. Write to portfolio_output.csv
-Output: Final enriched CSV + validation report
-```
-
-## 🔧 State Management
-
-### Atomic File Operations
-
-```python
-Pattern: Write → Temp File → Atomic Rename
+Pattern: Load → Modify → Write to Temp → Atomic Rename
 Locking: FileLock with 30-second timeout
-Retry: Exponential backoff on lock conflicts
-Cleanup: Remove temp files on failure
+Concurrency: Multiple shards can safely update state
+Recovery: Automatic temp file cleanup on failure
 ```
 
-### State Structure
+### State File Structure
 
 ```json
 {
-  "row_index": {
-    "Company": "Company Name",
-    "Symbol": "STOCK_SYMBOL",
-    "Shares": "1000",
-    "status": "resolved"
+  "0": {
+    "Name": "Apple Inc.",
+    "Symbol": "AAPL",
+    "Price": "150.00",
+    "# of Shares": "100",
+    "Market Value": "15000"
   }
 }
 ```
 
-## 🚀 Orchestration Flow
+### Batch Update Strategy
 
-### Phase 1: Analysis & Sharding
+```python
+Process:
+1. Load current state under lock
+2. Apply all shard updates to memory
+3. Write updated state atomically
+4. Update in-memory portfolio_data
+5. Release lock
+```
+
+## 📊 Intelligent Sharding System
+
+### Optimal Shard Creation (`create_shards()`)
+
+```python
+Algorithm:
+- Input: List of row indices requiring processing
+- Shard Size: Configurable (2 for demo, 50-100 for production)
+- Output: List of balanced shards for parallel execution
+- Load Balancing: Even distribution across shards
+```
+
+### Parallel Task Architecture
+
+```python
+Symbol Resolution Shards: Process missing symbols
+Name Resolution Shards: Process missing names
+Independent Execution: No inter-shard dependencies
+State Synchronization: File-lock coordinated updates
+```
+
+## 🎯 Task System Implementation
+
+### Task A: CSV Analysis & Sharding (`task_a_csv_reader.py`)
+
+```python
+Workflow:
+1. Load CSV → pandas DataFrame
+2. Data normalization (fillna, strip, uppercase symbols)
+3. Missing data identification:
+   - Missing symbols: has name, no symbol
+   - Missing names: has symbol, no name
+4. Intelligent shard creation for parallel processing
+5. State persistence with full validation
+6. Shard plan generation for orchestrator
+
+Output:
+- portfolio_state.json with all row data
+- Sharding plan with optimal task distribution
+```
+
+### Task B: Symbol Resolution (`task_b_symbol_resolver.py`)
+
+```python
+Shard Processing:
+1. Load state (no global variables)
+2. Validate shard row existence
+3. Process each row:
+   - Extract company name
+   - Apply three-tier resolution strategy
+   - Batch updates for atomic persistence
+4. Progress monitoring with heartbeat logging
+5. Error recovery and reporting
+6. Final statistics generation
+
+Features:
+- Rate-limited API calls (0.5s between requests)
+- Real-time progress reporting
+- Graceful error handling per row
+- Batch state updates for efficiency
+```
+
+### Task C: Name Resolution (`task_c_name_resolver.py`)
+
+```python
+Shard Processing:
+1. Load state independently
+2. Validate symbols exist
+3. Process each row:
+   - Extract stock symbol
+   - Call Finnhub profile API
+   - Validate response format
+   - Batch updates for atomic persistence
+4. Progress monitoring and heartbeat
+5. Error recovery with detailed logging
+
+Features:
+- Symbol normalization (uppercase, strip)
+- Response validation and error classification
+- Atomic batch updates
+- Performance monitoring
+```
+
+### Task D: CSV Writer & Validation (`task_d_csv_writer.py`)
+
+```python
+Final Assembly:
+1. Load complete enriched state
+2. Convert to structured DataFrame
+3. Comprehensive validation analysis:
+   - Symbol success rate calculation
+   - Name success rate calculation
+   - Overall completeness metrics
+   - Gap identification for debugging
+4. CSV generation with clean column mapping
+5. Detailed validation reporting
+
+Validation Metrics:
+- Total rows processed
+- Symbol/Name success rates (%)
+- Overall completeness percentage
+- Specific row gaps identification
+```
+
+## 🚀 Orchestration Flow (`orchestrator.py`)
+
+### Phase 1: Analysis & Planning
 
 ```python
 orchestrator.py → task_a_csv_reader.py
-- Load and analyze CSV
-- Identify missing data
-- Create optimal shards for parallel processing
-- Generate execution plan
+- CSV ingestion and analysis
+- Missing data pattern identification
+- Optimal shard size calculation
+- Parallel execution plan generation
+- Amp instruction document creation
 ```
 
-### Phase 2: Parallel Resolution
+### Phase 2: Distributed Parallel Execution
 
 ```python
-Multiple parallel agents:
-- Symbol Resolution Shards (Task B instances)
-- Name Resolution Shards (Task C instances)
-- Each shard processes subset of rows independently
-- Atomic state updates prevent conflicts
+Concurrent Shard Processing:
+- Multiple Task B instances (symbol resolution)
+- Multiple Task C instances (name resolution)
+- Independent execution with shared state
+- File-lock coordination for updates
+- Real-time progress monitoring
 ```
 
-### Phase 3: Final Assembly
+### Phase 3: Final Assembly & Validation
 
 ```python
 task_d_csv_writer.py
-- Collect all resolved data
-- Generate final enriched CSV
-- Produce validation report
+- State consolidation and validation
+- Final CSV generation
+- Comprehensive reporting
+- Success metrics calculation
 ```
 
-## ⚡ Performance Characteristics
+## 📈 Performance & Scalability
 
-### Scalability
+### Parallel Processing Characteristics
 
-- **Parallel Processing**: N shards can run simultaneously
-- **Optimal Shard Size**: 50-100 rows per shard (production)
-- **Memory Efficient**: Row-level processing, no full dataset loading
+- **Concurrent Shards**: N shards execute simultaneously
+- **Optimal Shard Size**: 2 (demo) → 50-100 (production)
+- **Memory Efficiency**: Row-level processing, no dataset duplication
+- **State Coordination**: File-lock based synchronization
 
-### API Efficiency
+### API Efficiency Optimizations
 
-- **Cache Hit Rate**: ~70% reduction in API calls via local caching
-- **Smart Fallbacks**: Tiktoken matching when API unavailable
-- **Rate Limit Compliance**: Automatic throttling and retry
+- **Cache Hit Rate**: ~70% reduction via local company universe
+- **Smart Fallbacks**: Multi-tier resolution prevents API exhaustion
+- **Rate Compliance**: 90% buffer with automatic throttling
+- **Semantic Enhancement**: Tiktoken-based scoring improves accuracy
 
-### Error Resilience
+### Error Resilience & Recovery
 
-- **Atomic Updates**: No partial state corruption
+- **Atomic State**: No partial corruption possible
 - **Graceful Degradation**: Multiple fallback strategies
-- **Progress Persistence**: Resume from any point of failure
+- **Progress Persistence**: Resume from any interruption point
+- **Shard Independence**: Individual shard failures don't affect others
 
-## 🎯 Key Design Principles
+## 🔧 Advanced Features
 
-1. **API-First Strategy**: Prioritize live data over cached/computed matches
-2. **Intelligent Fallbacks**: Multiple resolution strategies with quality scoring
-3. **Parallel Safe**: No global state, atomic file operations
-4. **Production Ready**: Comprehensive error handling and monitoring
-5. **Tiktoken Semantic**: Advanced similarity matching using modern tokenization
+### Tiktoken Semantic Matching
+
+```python
+SemanticMatcher Class:
+- Tokenizer: cl100k_base encoding (GPT-4 compatible)
+- Similarity: Jaccard coefficient on token sets
+- Normalization: Corporate suffix removal, special character handling
+- Fallback: Graceful degradation when tiktoken unavailable
+- Bonus Scoring: Word overlap, exact matches, acronym detection
+```
+
+### Company Universe Caching
+
+```python
+Cache Management:
+- Source: Finnhub /stock/symbol (US exchanges)
+- Refresh: 7-day TTL with automatic updates
+- Filtering: Common Stock only, symbol length ≤ 6
+- Storage: JSON with timestamp validation
+- Size: ~8000-10000 US companies
+```
+
+### Monitoring & Observability
+
+```python
+Dual Logging System:
+- Text Logs: Structured logging to monitoring.log
+- Markdown Reports: Real-time monitoring.md updates
+- Progress Tracking: Per-shard heartbeat monitoring
+- Error Classification: Detailed error categorization
+- Performance Metrics: Timing and success rate tracking
+```
+
+## 🎯 Production Architecture Principles
+
+1. **Zero Global State**: All data passed explicitly between functions
+2. **Atomic Operations**: File-lock coordinated state management
+3. **Horizontal Scalability**: Independent shard processing
+4. **API Resilience**: Multi-tier fallback with intelligent retry
+5. **Semantic Intelligence**: Tiktoken-enhanced matching accuracy
+6. **Error Recovery**: Comprehensive error handling and reporting
+7. **Monitoring**: Real-time observability and progress tracking
+8. **Configuration**: Environment-based API key management
