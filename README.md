@@ -59,7 +59,7 @@ After running the orchestrator, you'll have generated `amp_instructions.md` with
 
 ### Step 1: Install Amp Extension
 
-- Install the [Amp VS Code Extension](https://marketplace.visualstudio.com/items?itemName=amp.amp)
+- Install the [Amp VS Code Extension](https://ampcode.com/how-i-use-amp)
 - Restart VS Code if needed
 
 ### Step 2: Create Amp Thread
