@@ -103,6 +103,7 @@ tmp/
 *.log
 monitoring.md
 *.csv
+!Sample_Portfolio_Holdings.csv
 *.lock
 
 .venv/
